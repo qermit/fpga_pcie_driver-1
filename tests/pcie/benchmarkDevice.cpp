@@ -56,9 +56,11 @@ void testDMAKernelMemory(uint32_t *bar0, uint32_t *bar2,
 		const size_t test_len);
 
 
-int main()
+int main(int argc, char** argv)
 {
-	testDevice(0);
+        int i = atoi(argv[1]);
+
+	testDevice(i);
 
 	return 0;
 }

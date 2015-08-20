@@ -51,12 +51,18 @@ using namespace std;
 #define GSR_BIT_DDR_RDY (0x1 << 7)
 #define REG_WB_PG 0x24
 
-void testDevice( int i );
+#define INDEX_SDRAM_PG (REG_SDRAM_PG >> 2)
+#define INDEX_WB_PG (REG_WB_PG >> 2)
+
+
+void testDevice( int i, int size);
 void testBARs(pciDriver::PciDevice *dev);
 void testDirectIO(pciDriver::PciDevice *dev);
 void testPaging(pciDriver::PciDevice *dev);
 void testDMA(pciDriver::PciDevice *dev);
 void testInterrupts(pciDriver::PciDevice *dev);
+void testPagingPerformance(pciDriver::PciDevice *dev, int size);
+void dump_bar0(uint32_t *buf, int size);
 
 class BDA {
 public:
@@ -114,18 +120,19 @@ private:
 	BDA *lod;
 };
 
-int main()
+int main(int argc, char ** argv)
 {
-	int i;
-
-	for(i=0;i<4;i++) {
-		testDevice( i );
-	}
+	int i = atoi(argv[1]);
+	int size = atoi(argv[2]);
+	
+//	for(i=0;i<4;i++) {
+		testDevice( i,size);
+//	}
 
 	return 0;
 }
 
-void testDevice( int i ) {
+void testDevice( int i, int size) {
 	pciDriver::PciDevice *device;
 
 	try {
@@ -133,10 +140,12 @@ void testDevice( int i ) {
 		device = new pciDriver::PciDevice( i );
 		cout << "found" << endl;
 
-		testBARs(device);
-		testDirectIO(device);
-		testPaging(device);
-		testDMA(device);
+//		testBARs(device);
+//		testDirectIO(device);
+		//testPaging(device);
+		testPagingPerformance(device, size);
+
+//		testDMA(device);
 //		testInterrupts(device);
 
 		delete device;
@@ -161,6 +170,8 @@ void testBARs(pciDriver::PciDevice *dev)
 		try {
 			bar = dev->mapBAR(i);
 			cout << "mapped ";
+			if (i==0)  dump_bar0((uint32_t*)bar, 40);
+
 			dev->unmapBAR(i,bar);
 			cout << "unmapped ";
 			size = dev->getBARsize(i);
@@ -199,21 +210,36 @@ void testDirectIO(pciDriver::PciDevice *dev)
 		cout << "BAR2 size: " << bar2size << endl;
 		cout << "BAR4 size: " << bar4size << endl;
 
-		// test register memory
-		bar0[0] = 0x1234565;
-		bar0[1] = 0x5aa5c66c;
-
-		cout << "\nReading registers space (single access)" << endl;
-		for(i=0;i<MAX_LEN;i++) {
+		cout << "\nReading BAR0" << endl;
+		for(i=0;i<bar0size/sizeof(uint64_t);i++) {
 			val = bar0[i];
-			cout << hex << setw(8) << val << endl;
+			cout << dec << setw(4) << i << ": " <<hex << setw(8) << val << endl;
 		}
+		int j;
+		//0x0030 0000
+		for(j=0x30; j<=0x30; j++){
+//		bar0[0x78 >> 2] = 0x0a;
+		usleep(5000);
 
-		cout << "\nReading WB BRAM space (single access)" << endl;
-		for(i=0;i<MAX_LEN;i++) {
-			val = bar4[i];
-			cout << hex << setw(8) << val << endl;
+			uint32_t offset=0x10000 * j;
+			bar0[INDEX_WB_PG] = (offset / (bar4size >> 3));
+			bar0[INDEX_SDRAM_PG] = (offset / (bar2size >> 3));
+			cout << "Current WB Page: " << bar0[INDEX_WB_PG] << " address: " <<  hex << setw(8) << (bar0[INDEX_WB_PG]*(bar4size >> 3)) << endl;
+
+			// test register memory
+			//bar0[0] = 0x1234565;
+			//bar0[1] = 0x5aa5c66c;
+
+
+			bar4[0] = 0x12345678;
+			bar4[4] = 0xaabbccdd;
+			cout << "\nReading WB BRAM space (single access)" << endl;
+			for(i=0;i<120;i++) {
+				val = bar4[i];
+				cout <<  dec << setw(4) << i << ": "<< hex << setw(8) << val << endl;
+			}
 		}
+		/*
 
 		// write block
 		for(i=0;i<MAX_LEN;i++) {
@@ -229,11 +255,190 @@ void testDirectIO(pciDriver::PciDevice *dev)
 			cout << hex << setw(8) << val << endl;
 		}
 		cout << endl << endl;
-
+		*/
 		// Unmap BARs
 		dev->unmapBAR(0,bar0);
 		dev->unmapBAR(2,bar2);
 		dev->unmapBAR(4,bar4);
+
+		// Close device
+		dev->close();
+
+	} catch(Exception& e) {
+		cout << "Exception: " << e.toString() << endl;
+	}
+}
+
+void dump_bar2(uint32_t *buf, int size, int width){
+	int i;
+	for (i = 0; i< size; i++){
+		if (i % width == 0 ) printf("\n");
+		printf("%08X ", buf[i]);
+	}
+	cout << endl << endl;
+}
+void dump_bar0(uint32_t *buf, int size){
+	int i;
+	cout << "\nReading BAR0" << endl;
+	for (i = 0; i< size; i++){
+		if (i % 4 == 0 ) printf("\n");
+		printf("%08X ", buf[i]);
+	}
+	cout << endl << endl;
+}
+
+void dump_array(uint8_t *buf, int size){
+	int i;
+	cout << "DUPA: " << size << endl;
+	for (i = 0; i< size; i++){
+		if (i % 64 == 0 ) printf("\n %08X: ", (i/64) * 64);
+		printf("%02X ", buf[i]);
+	}
+	cout << endl << endl;
+}
+
+void testPagingPerformance(pciDriver::PciDevice *dev, int size)
+{
+	uint32_t *bar2;
+	uint32_t *bar0;
+	unsigned int bar0size, bar2size, bar4size;
+	volatile uint32_t val;
+	    int i;
+
+	try {
+		// Open device
+		dev->open();
+
+		// Map BARs
+	    bar0 = static_cast<uint32_t *>( dev->mapBAR(0) );
+	    bar2 = static_cast<uint32_t *>( dev->mapBAR(2) );
+            bar0size = dev->getBARsize(0);
+            bar4size = dev->getBARsize(4);
+            bar2size = dev->getBARsize(2);
+	    cout << "bar0 size: " << dec << bar0size << endl << "bar0 length: 0x" << hex << bar0size / sizeof(uint32_t) << endl << endl;
+	    cout << "bar2 size: " << dec << bar2size << endl << "bar2 length: 0x" << hex << bar2size / sizeof(uint32_t) << endl << endl;
+	    cout << "bar4 size: " << dec << bar4size << endl << "bar4 length: 0x" << hex << bar4size / sizeof(uint64_t) << endl << endl;
+	
+	    dump_bar0( bar0, 40);
+	    uint32_t *ptr = (uint32_t *) malloc(bar2size);
+#define MY_SIZE_T uint32_t
+	    MY_SIZE_T *read_ptr = (MY_SIZE_T *) malloc(size * sizeof(MY_SIZE_T));
+	    bzero(read_ptr, size * sizeof(MY_SIZE_T));
+//	    uint32_t *read_ptr = (uint32_t *) malloc(size * sizeof(uint32_t));
+//		bzero(read_ptr, size * sizeof(uint32_t));
+	    bar0[0x78 >> 2] = 0x0a;
+	    //usleep(100000);
+	    if (ptr == NULL) {
+		cout << "ERROR ALLOC" << endl;
+	    }
+	    srand(time(NULL));
+	    bzero(ptr, bar2size );
+	    for(i=0; i< size; i++){
+//if (i % 16 == 0 ) cout << endl;
+//cout << hex  << setw(3) << i%256 ;
+//		ptrar4[i] = i&256;
+//		bar2[i] = 0;
+		ptr[i] = rand();
+
+	    }
+            printf("Random data to write\n");
+
+	    dump_bar2((uint32_t *)ptr, size, 32);
+	    
+	    bar0[INDEX_SDRAM_PG] = 0;
+	    printf("\nWriting with memcpy: %d(uint32_t)\n", size);
+	    usleep(100);
+	    if (0) {
+	    for(i=0; i<size; i++){
+		bar2[i] = ptr[i];
+	    } 
+            } else {
+		memcpy((void *)bar2, (void *)ptr, size*sizeof(uint32_t));
+	    }
+	    usleep(100);
+
+	    dump_bar0( bar0, 40);
+            for(int z = 0 ; z<1; z++) {
+	    bar0[INDEX_SDRAM_PG] = 0;
+	    bzero(read_ptr, size * sizeof(MY_SIZE_T));
+		bar0[INDEX_SDRAM_PG] = 1;
+      	    printf("Reading BAR2 (page[1]) without memcpy\n");
+	    MY_SIZE_T *bar2_prim = (MY_SIZE_T*)bar2;
+	    for(i=0; i<size; i++){
+		read_ptr[i] = bar2[i];
+	    }
+	
+	    dump_bar2((uint32_t *)read_ptr, size*sizeof(MY_SIZE_T)/sizeof(uint32_t), 32);
+	    {
+		    int retval = memcmp(read_ptr, ptr, size * sizeof(MY_SIZE_T));
+		    printf("memcmp status: %d\n", retval);
+            }
+	    dump_bar0( bar0, 40);
+
+	    bzero(read_ptr, size * sizeof(MY_SIZE_T));
+		bar0[INDEX_SDRAM_PG] = 0;
+      	    printf("Reading BAR2 (page[0]  without memcpy\n");
+            uint8_t * ptr1 = (uint8_t*)bar2; 
+	    uint8_t * ptr2 = (uint8_t*)read_ptr; 
+
+	    for(i=0; i<size; i++){
+		ptr2[i] = ptr1[i];
+		//read_ptr[i] = bar2[i];
+	    }
+	    dump_bar2((uint32_t *)read_ptr, size*sizeof(MY_SIZE_T)/sizeof(uint32_t), 32);
+	    {
+		    int retval = memcmp(read_ptr, ptr, size * sizeof(MY_SIZE_T));
+		    printf("memcmp status: %d\n", retval);
+            }
+	    dump_bar0( bar0, 40);
+
+	    bzero(read_ptr, size * sizeof(MY_SIZE_T));
+      	    printf("Reading BAR2 using memcpy\n");
+	    memcpy(read_ptr, bar2, size);
+	    dump_bar2((uint32_t *)read_ptr, size*sizeof(MY_SIZE_T)/sizeof(uint32_t), 32);
+	    {
+		    int retval = memcmp(read_ptr, ptr, size * sizeof(MY_SIZE_T));
+		    printf("memcmp status: %d\n", retval);
+            }
+	    dump_bar0( bar0, 40);
+		bar0[0x78 >> 2] = 0x0a;
+		usleep(100);
+            }
+//   bar0[INDEX_SDRAM_PG] = 0;
+
+	    //memcpy((uint32_t *)ptr, (uint32_t *)bar2, size*sizeof(uint32_t) );
+	    //dump_bar2(ptr, size, 32);
+	    //dump_bar0( bar0, 40);
+
+		free(read_ptr);
+	    free(ptr);
+
+/*		
+ *		srand(time(NULL));
+		
+		cout << "## Testing paging on DDR SDRAM space" << endl;
+		for (int i = 0; i < 4; i++) {
+			bar0[REG_SDRAM_PG>>2] = i;
+			cout << "# Writing to page: " << i << endl;
+			for (int addr = 0; addr < 5; addr++) {
+				val = rand();
+				cout << "addr = " << addr << " val = " << val << endl;
+				bar2[addr] = val;
+			}
+		}
+
+		for (int i = 0; i < 4; i++) {
+			bar0[REG_SDRAM_PG>>2] = i;
+			cout << "\n# Reading from page: " << i << endl;
+			for (int addr = 0; addr < 5; addr++) {
+				val = bar2[addr];
+				cout << "addr = " << addr << " val = " << val << endl;
+			}
+		}
+		*/
+		// Unmap BARs
+		dev->unmapBAR(0,bar0);
+		dev->unmapBAR(2,bar2);
 
 		// Close device
 		dev->close();
